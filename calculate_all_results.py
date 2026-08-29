@@ -1,8 +1,15 @@
 import torch
 import os
+import argparse
 
 import openpyxl
 from sklearn.metrics import recall_score, f1_score, accuracy_score
+
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--results_dir', type=str, default=os.path.join('.', 'results'),
+                     help="Folder holding the per-subject *_acc.txt for one run "
+                          "(e.g. ./results/disentangled_seed2025).")
+_args = _parser.parse_args()
 
 def confusion_matrix(matrix, conf_matrix):
     for i in matrix:
@@ -23,8 +30,8 @@ uf1_alls = []
 
 classes = ['happiness','surprise','negative']
 num_class = 3
-resultPath = r'.\results'
-rAS_train_acc = resultPath + "\\" + 'CausalNet.xlsx'
+resultPath = _args.results_dir
+rAS_train_acc = os.path.join(resultPath, 'CausalNet.xlsx')
 
 
 matrix = torch.zeros(num_class, num_class, dtype=torch.int64)
@@ -36,7 +43,7 @@ all_matrix_stable=[]
 all = ['sub17', 'sub26', 'sub16', 'sub09', 'sub05', 'sub24', 'sub02', 'sub13', 'sub04', 'sub23', 'sub11', 'sub12', 'sub08', 'sub14', 'sub03', 'sub19', 'sub01',
             'sub20', 'sub21', 'sub22', 'sub15', 'sub06', 'sub25', 'sub07','006','007','009','010','011','012','013','014','015','016','017','018','019','020','021','022','023','024','026','028','030','032','031','033','034','035','036','037','s01','s02','s03','s04','s05','s06','s08','s09','s11','s12','s13','s14','s15','s18','s19','s20']
 for i in all:
-    with open(os.path.join('.', 'results', str(i)+'_acc.txt'), "r") as f:
+    with open(os.path.join(resultPath, str(i)+'_acc.txt'), "r") as f:
         data = f.readlines()
         matrix_tmp = []
         tmp = data[2][12:-2]

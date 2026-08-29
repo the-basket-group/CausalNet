@@ -237,12 +237,23 @@ class CrossTransformer(nn.Module):
 
 
 class SpatialTemporalCausalAttention(nn.Module):
-    def __init__(self, dim, heads=8, dropout=0., gamma=0.4):
+    # mode selects how the per-phase spatial (self-)attention is parameterised (RQ1):
+    #   'shared'       - one spatial-attention parameter set (theta) processes both the
+    #                    contraction and relaxation phases. This is CausalNet's default.
+    #   'disentangled' - each phase gets its own spatial-attention set (theta_c, theta_r);
+    #                    this is the proposed phase-disentangled attention (the contribution).
+    #   'shared_wide'  - phases still share weights, but a second set is applied as an extra
+    #                    shared layer so the parameter budget matches 'disentangled'. This is
+    #                    the capacity control (proposal Sec 4.5): it isolates whether any gain
+    #                    is from disentangling the phases or merely from the added parameters.
+    # The temporal/causal cross-attention (the phase interaction) is left shared in every mode.
+    def __init__(self, dim, heads=8, dropout=0., gamma=0.4, mode='shared'):
         super().__init__()
         self.heads = heads
         self.dim_head = dim // heads
         self.scale = self.dim_head ** -0.5
         self.gamma = gamma
+        self.mode = mode
 
 
         positions = torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=torch.float)
@@ -280,13 +291,25 @@ class SpatialTemporalCausalAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def spatial_attention(self, x):
+        # Second spatial-attention set, created only for the non-shared modes so that
+        # 'shared' stays bit-for-bit identical to the original CausalNet (same modules,
+        # same weight-init RNG order). In 'disentangled' it is the relaxation-phase set;
+        # in 'shared_wide' it is the extra shared layer.
+        if mode in ('disentangled', 'shared_wide'):
+            self.to_q2 = nn.Linear(dim, dim)
+            self.to_kv2 = nn.Linear(dim, dim * 2)
+            self.to_out2 = nn.Sequential(
+                nn.Linear(dim, dim),
+                nn.Dropout(dropout)
+            )
 
+    def _spatial(self, x, to_q, to_kv, to_out):
+        # AU-positioned spatial (self-)attention with the given projection set.
         h = self.heads
 
 
-        q = self.to_q(x)
-        k, v = self.to_kv(x).chunk(2, dim=-1)
+        q = to_q(x)
+        k, v = to_kv(x).chunk(2, dim=-1)
 
 
         q = rearrange(q, 'b n (h d) -> b h n d', h=h)
@@ -305,7 +328,11 @@ class SpatialTemporalCausalAttention(nn.Module):
 
         out = torch.einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out)
+        return to_out(out)
+
+    def spatial_attention(self, x):
+        # Shared spatial attention (the primary set) - the original CausalNet path.
+        return self._spatial(x, self.to_q, self.to_kv, self.to_out)
 
     def temporal_attention(self, x1, x2):
 
@@ -346,8 +373,20 @@ class SpatialTemporalCausalAttention(nn.Module):
 
     def forward(self, x1, x2):
 
-        x1 = self.spatial_attention(x1)+x1
-        x2 = self.spatial_attention(x2)+x2
+        if self.mode == 'disentangled':
+            # Each phase processed by its own spatial-attention parameters (theta_c, theta_r).
+            x1 = self._spatial(x1, self.to_q, self.to_kv, self.to_out) + x1
+            x2 = self._spatial(x2, self.to_q2, self.to_kv2, self.to_out2) + x2
+        elif self.mode == 'shared_wide':
+            # Shared across phases, but two stacked sets -> same param budget as disentangled.
+            x1 = self._spatial(x1, self.to_q, self.to_kv, self.to_out) + x1
+            x1 = self._spatial(x1, self.to_q2, self.to_kv2, self.to_out2) + x1
+            x2 = self._spatial(x2, self.to_q, self.to_kv, self.to_out) + x2
+            x2 = self._spatial(x2, self.to_q2, self.to_kv2, self.to_out2) + x2
+        else:
+            # 'shared': one set for both phases (CausalNet default).
+            x1 = self.spatial_attention(x1) + x1
+            x2 = self.spatial_attention(x2) + x2
 
 
         x2 = self.temporal_attention(x1, x2) + x2
@@ -399,14 +438,14 @@ class CausalRelationMining(nn.Module):
 
 
 class CausalAttentionBlock(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_mult, gamma,dropout=0.):
+    def __init__(self, dim, depth, heads, mlp_mult, gamma,dropout=0., mode='shared'):
         super().__init__()
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 nn.LayerNorm(dim),  # 归一化层
-                SpatialTemporalCausalAttention(dim, heads=heads, dropout=dropout,gamma=gamma),  # STCA
+                SpatialTemporalCausalAttention(dim, heads=heads, dropout=dropout,gamma=gamma, mode=mode),  # STCA
                 nn.Sequential(  # FFN
                     nn.Linear(dim, dim * mlp_mult),
                     nn.GELU(),
@@ -470,7 +509,8 @@ class CausalNet(nn.Module):
         channels = 3,
         dim_head = 64,
         dropout = 0.,
-            gamma=0.4
+            gamma=0.4,
+            attn_mode='shared'
     ):
         super().__init__()
         assert (image_size % patch_size) == 0, 'Image dimensions must be divisible by the patch size.'
@@ -528,7 +568,8 @@ class CausalNet(nn.Module):
             heads=8,
             mlp_mult=mlp_mult,
             dropout=dropout,
-            gamma=gamma
+            gamma=gamma,
+            mode=attn_mode
         )
 
 

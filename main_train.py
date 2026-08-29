@@ -1,6 +1,7 @@
 import random
 from os import path
 import os
+import shutil
 import cv2
 import time
 
@@ -132,11 +133,20 @@ def crop_optical_flow_block():
 
 
 def main(config):
-    seed = 2025
+    seed = config.seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    # Each (attn_mode, seed) run writes its per-subject txts into its own folder so the
+    # three variants never clobber each other. calculate_all_results.py --results_dir reads it.
+    run_name = config.run_name or ('%s_seed%d' % (config.attn_mode, seed))
+    results_dir = os.path.join('.', 'results', run_name)
+    if os.path.exists(results_dir):
+        shutil.rmtree(results_dir)
+    os.makedirs(results_dir)
+    print('attn_mode=%s | seed=%d | results_dir=%s' % (config.attn_mode, seed, results_dir))
 
     learning_rate = 0.00005
     batch_size = 256*4
@@ -263,7 +273,8 @@ def main(config):
             block_repeats=(3, 3, 9),  # (2, 2, 8),------
 
             num_classes=3,
-            gamma=0.5
+            gamma=0.5,
+            attn_mode=config.attn_mode
         )
         model = model.to(device)
 
@@ -354,18 +365,14 @@ def main(config):
                 # if (config.train):
                 #     torch.save(model.state_dict(), weight_path)
             if val_acc>=1:
-                if not os.path.exists(os.path.join('.', 'results')):
-                    os.makedirs(os.path.join('.', 'results'))
-                with open(os.path.join('.', 'results', str(n_subName) + '_acc.txt'), 'a') as f:
+                with open(os.path.join(results_dir, str(n_subName) + '_acc.txt'), 'a') as f:
                     f.write('best epoach: ' + str(best_epoch) + '\n' + 'best acc: ' + str(
                         best_accuracy_for_each_subject) + '\n' + 'matrix_acc: ' + str(best_matrix) + '\n')
 
                 break
             if epoch == epochs:
 
-                if not os.path.exists(os.path.join('.', 'results')):
-                    os.makedirs(os.path.join('.', 'results'))
-                with open(os.path.join('.', 'results', str(n_subName) + '_acc.txt'), 'a') as f:
+                with open(os.path.join(results_dir, str(n_subName) + '_acc.txt'), 'a') as f:
                     f.write('best epoach: ' + str(best_epoch) + '\n' + 'best acc: ' + str(
                         best_accuracy_for_each_subject) + '\n' + 'matrix_acc: ' + str(best_matrix) + '\n')
 
@@ -398,5 +405,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--train', type=strtobool, default=True)
+    parser.add_argument('--attn_mode', type=str, default='shared',
+                        choices=['shared', 'disentangled', 'shared_wide'],
+                        help="Phase attention: shared (CausalNet baseline), disentangled "
+                             "(per-phase params, the contribution), or shared_wide (capacity control).")
+    parser.add_argument('--seed', type=int, default=2025)
+    parser.add_argument('--run_name', type=str, default='',
+                        help="Results subfolder name. Defaults to '<attn_mode>_seed<seed>'.")
     config = parser.parse_args()
     main(config)

@@ -4,6 +4,12 @@ import numpy as np
 
 import openpyxl
 from sklearn.metrics import recall_score, f1_score, accuracy_score
+import argparse
+
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--results_dir', type=str, default=os.path.join('.', 'results'),
+                     help="Folder holding the per-subject *_acc.txt for one run.")
+_args = _parser.parse_args()
 
 def confusion_matrix(matrix, conf_matrix):
     for i in matrix:
@@ -24,8 +30,8 @@ uf1_alls = []
 
 classes = ['happiness','surprise','negative']
 num_class = 3
-resultPath = r'.\results'
-rAS_train_acc = resultPath + "\\" + 'CausalNet_CASMEII.xlsx'
+resultPath = _args.results_dir
+rAS_train_acc = os.path.join(resultPath, 'CausalNet_CASMEII.xlsx')
 
 
 matrix = torch.zeros(num_class, num_class, dtype=torch.int64)
@@ -37,7 +43,7 @@ all_matrix_stable=[]
 all = ['sub17', 'sub26', 'sub16', 'sub09', 'sub05', 'sub24', 'sub02', 'sub13', 'sub04', 'sub23', 'sub11', 'sub12', 'sub08', 'sub14', 'sub03', 'sub19', 'sub01',
             'sub20', 'sub21', 'sub22', 'sub15', 'sub06', 'sub25', 'sub07']
 for i in all:
-    with open(os.path.join('.', 'results', str(i)+'_acc.txt'), "r") as f:
+    with open(os.path.join(resultPath, str(i)+'_acc.txt'), "r") as f:
         data = f.readlines()
         matrix_tmp = []
         tmp = data[2][12:-2]
