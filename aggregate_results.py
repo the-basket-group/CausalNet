@@ -6,16 +6,47 @@ per variant, averaged across seeds (mean +/- std). Reads the same prediction fil
 calculate_all_results.py uses, so the numbers match.
 
     python aggregate_results.py                          # all modes, seeds found on disk
-    python aggregate_results.py --modes shared disentangled --seeds 2025
+    python aggregate_results.py --modes shared dual --seeds 2025
 """
 import os
 import ast
+import json
 import glob
 import argparse
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from sklearn.metrics import recall_score, f1_score, accuracy_score
 
 LABELS = [0, 1, 2]
+
+
+def plot_curves(results_dir, mode, seed):
+    """Mean train/val loss and val UF1 across folds for one run (from history.json)."""
+    hp = os.path.join(results_dir, f"{mode}_seed{seed}", "history.json")
+    if not os.path.exists(hp):
+        print(f"no history.json for {mode}_seed{seed}")
+        return
+    hists = list(json.load(open(hp)).values())
+    n = min(len(h["train_loss"]) for h in hists)
+    tr = np.mean([h["train_loss"][:n] for h in hists], axis=0)
+    val = np.mean([h["val_loss"][:n] for h in hists], axis=0)
+    uf1 = np.mean([h["val_uf1"][:n] for h in hists], axis=0)
+    best = [h["best_epoch"] for h in hists]
+
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+    ax[0].plot(tr, label="train loss")
+    ax[0].plot(val, label="val loss")
+    ax[0].set_xlabel("epoch"); ax[0].set_ylabel("loss"); ax[0].legend()
+    ax[0].set_title(f"{mode}: mean loss (best epoch median={int(np.median(best))})")
+    ax[1].plot(uf1, color="green")
+    ax[1].set_xlabel("epoch"); ax[1].set_ylabel("val UF1")
+    ax[1].set_title("mean validation UF1")
+    fig.tight_layout()
+    out = os.path.join(results_dir, f"history_{mode}.png")
+    fig.savefig(out, dpi=120); plt.close(fig)
+    print("saved", out)
 
 
 def load_run(run_dir):
@@ -59,9 +90,10 @@ def discover_seeds(results_dir, modes):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results_dir", default=os.path.join(".", "results"))
-    ap.add_argument("--modes", nargs="+", default=["shared", "disentangled", "shared_wide"])
+    ap.add_argument("--modes", nargs="+", default=["shared", "dual", "shared_matched"])
     ap.add_argument("--seeds", nargs="+", type=int, default=None,
                     help="Seeds to include; default = whatever is found on disk.")
+    ap.add_argument("--curves", action="store_true", help="Also plot mean loss / val-UF1 curves per mode.")
     args = ap.parse_args()
 
     seeds = args.seeds or discover_seeds(args.results_dir, args.modes)
@@ -93,6 +125,10 @@ def main():
                 std = " ".join(f"{np.std(per_seed[c]):7.4f}" for c in cols)
                 print(f"{mode:14s} {'std':>6s} " + std)
         print()
+
+    if args.curves and seeds:
+        for mode in args.modes:
+            plot_curves(args.results_dir, mode, seeds[0])
 
 
 if __name__ == "__main__":

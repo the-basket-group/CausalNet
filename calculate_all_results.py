@@ -8,7 +8,7 @@ from sklearn.metrics import recall_score, f1_score, accuracy_score
 _parser = argparse.ArgumentParser()
 _parser.add_argument('--results_dir', type=str, default=os.path.join('.', 'results'),
                      help="Folder holding the per-subject *_acc.txt for one run "
-                          "(e.g. ./results/disentangled_seed2025).")
+                          "(e.g. ./results/dual_seed2025).")
 _args = _parser.parse_args()
 
 def confusion_matrix(matrix, conf_matrix):

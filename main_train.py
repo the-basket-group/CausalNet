@@ -4,6 +4,8 @@ import os
 import shutil
 import cv2
 import time
+import json
+from copy import deepcopy
 
 import pandas
 from sklearn.metrics import confusion_matrix
@@ -131,6 +133,40 @@ def crop_optical_flow_block():
     return four_parts_optical_flow_imgs
 
 
+def subject_of(name):
+    # Subject id is the first underscore-token: '006_006_1_2'->'006', 'sub09_..'->'sub09', 's04_..'->'s04'.
+    return name.split('_')[0]
+
+
+def stack_four(name, flows):
+    # Build the 4-frame [base, _1, _2, _3] input for one clip from its cropped 5-part flow.
+    base = name.split(' ')[0]
+    frames = []
+    for key in (name, base + '_1 .png', base + '_2 .png', base + '_3 .png'):
+        f = flows[key]
+        l_eye_lips = cv2.hconcat([f[0], f[1]])
+        r_eye_lips = cv2.hconcat([f[3], f[4]])
+        frames.append(cv2.vconcat([l_eye_lips, r_eye_lips]))
+    return frames
+
+
+def read_split(main_path, subname, split, flows):
+    # Read one split folder (u_train / u_test) -> (X 4-frame stacks, y labels, subject ids).
+    X, y, subj = [], [], []
+    root = os.path.join(main_path, subname, split)
+    for cls in os.listdir(root):
+        for n_img in os.listdir(os.path.join(root, cls)):
+            X.append(stack_four(n_img, flows))
+            y.append(int(cls))
+            subj.append(subject_of(n_img))
+    return X, y, subj
+
+
+def make_loader(X, y, batch_size, shuffle=False):
+    x = torch.Tensor(np.array(X)).permute(0, 1, 4, 2, 3)
+    y = torch.Tensor(y).to(dtype=torch.long)
+    return DataLoader(TensorDataset(x, y), batch_size=batch_size, shuffle=shuffle)
+
 
 def main(config):
     seed = config.seed
@@ -149,255 +185,124 @@ def main(config):
     print('attn_mode=%s | seed=%d | results_dir=%s' % (config.attn_mode, seed, results_dir))
 
     learning_rate = 0.00005
-    batch_size = 256*4
+    batch_size = 256 * 4
     epochs = 200
-    all_accuracy_dict = {}
-    is_cuda = torch.cuda.is_available()
-    if is_cuda:
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
+    n_val = 4  # subjects held out of each fold's training pool for validation
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     loss_fn = nn.CrossEntropyLoss()
-    if (config.train):
-        if not path.exists('ourmodel_threedatasets_weights'):
-            os.mkdir('ourmodel_threedatasets_weights')
-
-    print('lr=%f, epochs=%d, device=%s\n' % (learning_rate, epochs, device))
-
-    total_gt = []
-    total_pred = []
-    best_total_pred = []
-
-    t = time.time()
+    print('lr=%f, epochs=%d, n_val=%d, device=%s\n' % (learning_rate, epochs, n_val, device))
 
     main_path = './datasets/three_norm_u_v_os'
     subName = os.listdir(main_path)
     all_five_parts_optical_flow = crop_optical_flow_block()
     print(subName)
 
+    total_gt, total_pred = [], []
+    histories = {}
+    t = time.time()
+
     for n_subName in subName:
         print('Subject:', n_subName)
-        y_train = []
-        y_test = []
-        four_parts_train = []
+        # LOSO fold: this subject is the test set; all others form the training pool.
+        X_pool, y_pool, subj_pool = read_split(main_path, n_subName, 'u_train', all_five_parts_optical_flow)
+        X_test, y_test, _ = read_split(main_path, n_subName, 'u_test', all_five_parts_optical_flow)
 
-        four_parts_test = []
+        # Carve a subject-independent validation set out of the training pool (nested LOSO).
+        train_subjects = sorted(set(subj_pool))
+        rng = np.random.default_rng(seed)
+        val_subjects = set(rng.choice(train_subjects, size=min(n_val, len(train_subjects) - 1), replace=False))
+        tr = [i for i, s in enumerate(subj_pool) if s not in val_subjects]
+        va = [i for i, s in enumerate(subj_pool) if s in val_subjects]
 
-        # Get train dataset
-        expression = os.listdir(main_path + '/' + n_subName + '/u_train')
-        for n_expression in expression:
-            img = os.listdir(main_path + '/' + n_subName + '/u_train/' + n_expression)
-
-            for n_img in img:
-                y_train.append(int(n_expression))
-
-                l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
-                r_eye_lips  =  cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
-                lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
-
-                n_img1=n_img.split(' ')[0]+'_1 .png'
-
-                l_eye_lips1 = cv2.hconcat([all_five_parts_optical_flow[n_img1][0], all_five_parts_optical_flow[n_img1][1]])
-                r_eye_lips1 = cv2.hconcat([all_five_parts_optical_flow[n_img1][3], all_five_parts_optical_flow[n_img1][4]])
-                lr_eye_lips1 = cv2.vconcat([l_eye_lips1, r_eye_lips1])
-
-                n_img2 = n_img.split(' ')[0] + '_2 .png'
-
-                l_eye_lips2 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img2][0], all_five_parts_optical_flow[n_img2][1]])
-                r_eye_lips2 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img2][3], all_five_parts_optical_flow[n_img2][4]])
-                lr_eye_lips2 = cv2.vconcat([l_eye_lips2, r_eye_lips2])
-
-                n_img3 = n_img.split(' ')[0] + '_3 .png'
-
-                l_eye_lips3 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img3][0], all_five_parts_optical_flow[n_img3][1]])
-                r_eye_lips3 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img3][3], all_five_parts_optical_flow[n_img3][4]])
-                lr_eye_lips3 = cv2.vconcat([l_eye_lips3, r_eye_lips3])
-              
-                four_parts_train.append([lr_eye_lips,lr_eye_lips1,lr_eye_lips2,lr_eye_lips3])
-
-
-
-
-
-
-        # Get test dataset
-        expression = os.listdir(main_path + '/' + n_subName + '/u_test')
-        for n_expression in expression:
-            img = os.listdir(main_path + '/' + n_subName + '/u_test/' + n_expression)
-
-            for n_img in img:
-                y_test.append(int(n_expression))
-                l_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][0], all_five_parts_optical_flow[n_img][1]])
-                r_eye_lips = cv2.hconcat([all_five_parts_optical_flow[n_img][3], all_five_parts_optical_flow[n_img][4]])
-                lr_eye_lips = cv2.vconcat([l_eye_lips, r_eye_lips])
-
-                n_img1 = n_img.split(' ')[0] + '_1 .png'
-
-                l_eye_lips1 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img1][0], all_five_parts_optical_flow[n_img1][1]])
-                r_eye_lips1 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img1][3], all_five_parts_optical_flow[n_img1][4]])
-                lr_eye_lips1 = cv2.vconcat([l_eye_lips1, r_eye_lips1])
-
-                n_img2 = n_img.split(' ')[0] + '_2 .png'
-
-                l_eye_lips2 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img2][0], all_five_parts_optical_flow[n_img2][1]])
-                r_eye_lips2 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img2][3], all_five_parts_optical_flow[n_img2][4]])
-                lr_eye_lips2 = cv2.vconcat([l_eye_lips2, r_eye_lips2])
-
-                n_img3 = n_img.split(' ')[0] + '_3 .png'
-
-                l_eye_lips3 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img3][0], all_five_parts_optical_flow[n_img3][1]])
-                r_eye_lips3 = cv2.hconcat(
-                    [all_five_parts_optical_flow[n_img3][3], all_five_parts_optical_flow[n_img3][4]])
-                lr_eye_lips3 = cv2.vconcat([l_eye_lips3, r_eye_lips3])
-
-                four_parts_test.append([lr_eye_lips, lr_eye_lips1,lr_eye_lips2,lr_eye_lips3])
-
-        # weight_path = 'I:\ourmodel_threedatasets_weights' + '/' + n_subName + '.pth'
-
+        train_dl = make_loader([X_pool[i] for i in tr], [y_pool[i] for i in tr], batch_size, shuffle=True)
+        val_dl = make_loader([X_pool[i] for i in va], [y_pool[i] for i in va], batch_size)
+        test_dl = make_loader(X_test, y_test, batch_size)
 
         model = CausalNet(
             image_size=28,
             patch_size=7,
-            dim=256,  # 256,--96, 56-, 192
-            heads=3,  # 3 ---- , 6-
-            num_hierarchies=3,  # 3----number of hierarchies
-            block_repeats=(3, 3, 9),  # (2, 2, 8),------
-
+            dim=256,
+            heads=3,
+            num_hierarchies=3,
+            block_repeats=(3, 3, 9),
             num_classes=3,
             gamma=0.5,
-            attn_mode=config.attn_mode
-        )
-        model = model.to(device)
+            attn_mode=config.attn_mode,
+        ).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        if(config.train):
+        best_val_uf1, best_state, best_epoch = -1.0, None, 0
+        hist = {'train_loss': [], 'val_loss': [], 'val_uf1': []}
 
-            print('train')
-            print(len(y_train))
-            print(len(y_test))
-        # else:
-        #     model.load_state_dict(torch.load(weight_path))
-        optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate)
-        y_train = torch.Tensor(y_train).to(dtype=torch.long)
-
-        four_parts_train =  torch.Tensor(np.array(four_parts_train))
-
-        four_parts_train =four_parts_train.permute(0, 1,4, 2, 3)
-
-
-        dataset_train = TensorDataset(four_parts_train, y_train)
-        train_dl = DataLoader(dataset_train, batch_size=batch_size)
-        y_test = torch.Tensor(y_test).to(dtype=torch.long)
-        four_parts_test = torch.Tensor(np.array(four_parts_test))
-        four_parts_test=four_parts_test.permute(0, 1,4, 2, 3)
-        dataset_test = TensorDataset(four_parts_test, y_test)
-        test_dl = DataLoader(dataset_test, batch_size=batch_size)
-        # store best results
-        best_accuracy_for_each_subject = 0
-        best_each_subject_pred = []
-        best_epoch=0
-        best_matrix=[]
         for epoch in range(1, epochs + 1):
-            if (config.train):
-                # Training
-                model.train()
-                train_loss = 0.0
-                num_train_correct = 0
-                num_train_examples = 0
-                matrix=[]
+            model.train()
+            tr_loss = 0.0
+            for x, y in train_dl:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad()
+                out = model(x)
+                loss = loss_fn(out, y)
+                loss.backward()
+                optimizer.step()
+                tr_loss += loss.item() * x.size(0)
+            tr_loss /= max(len(train_dl.dataset), 1)
 
-                for batch in train_dl:
-                    optimizer.zero_grad()
-                    x = batch[0].to(device)
-
-                    y = batch[1].to(device)
-                    yhat = model(x)
-                    loss = loss_fn(yhat, y)
-                    loss.backward()
-                    optimizer.step()
-
-                    train_loss += loss.data.item() * x.size(0)
-                    num_train_correct += (torch.max(yhat, 1)[1] == y).sum().item()
-                    num_train_examples += x.shape[0]
-
-
-
-
+            # Validate: model selection uses validation UF1 only (test subject is never seen here).
             model.eval()
-            val_loss = 0.0
-            num_val_correct = 0
-            num_val_examples = 0
-            for batch in test_dl:
-                x = batch[0].to(device)
-                y = batch[1].to(device)
-                yhat = model(x)
-                loss = loss_fn(yhat, y)
+            v_loss, v_pred, v_gt = 0.0, [], []
+            with torch.no_grad():
+                for x, y in val_dl:
+                    x, y = x.to(device), y.to(device)
+                    out = model(x)
+                    v_loss += loss_fn(out, y).item() * x.size(0)
+                    v_pred += torch.max(out, 1)[1].cpu().tolist()
+                    v_gt += y.cpu().tolist()
+            v_loss /= max(len(val_dl.dataset), 1)
+            v_uf1, _ = recognition_evaluation(v_gt, v_pred)
+            v_uf1 = float(v_uf1) if v_uf1 != '' else 0.0
 
-                _, predicts = torch.max(yhat, 1)
-                for a in range(0, len(predicts)):
-                    matrix.append([int(predicts[a]), int(y[a])])
+            hist['train_loss'].append(tr_loss)
+            hist['val_loss'].append(v_loss)
+            hist['val_uf1'].append(v_uf1)
+            if v_uf1 > best_val_uf1:
+                best_val_uf1, best_epoch = v_uf1, epoch
+                best_state = deepcopy(model.state_dict())
+            print('[Epoch %d] train_loss=%.4f val_loss=%.4f val_uf1=%.4f (best_epoch=%d)'
+                  % (epoch, tr_loss, v_loss, v_uf1, best_epoch))
 
-                val_loss += loss.data.item() * x.size(0)
-                num_val_correct += (torch.max(yhat, 1)[1] == y).sum().item()
-                num_val_examples += y.shape[0]
+        # Test once, with the best-validation checkpoint.
+        model.load_state_dict(best_state)
+        model.eval()
+        te_pred, te_gt = [], []
+        with torch.no_grad():
+            for x, y in test_dl:
+                x, y = x.to(device), y.to(device)
+                out = model(x)
+                te_pred += torch.max(out, 1)[1].cpu().tolist()
+                te_gt += y.cpu().tolist()
 
-            val_acc = num_val_correct / num_val_examples
-            val_loss = val_loss / len(test_dl.dataset)
-            print("[Epoch %d] Validation accuracy:%.4f. Loss:%.3f" % (epoch, val_acc, val_loss))
+        # Same _acc.txt layout as before so calculate_all_results.py / aggregate_results.py still read it.
+        matrix = [[int(p), int(g)] for p, g in zip(te_pred, te_gt)]
+        test_acc = float(np.mean([p == g for p, g in zip(te_pred, te_gt)])) if te_gt else 0.0
+        with open(os.path.join(results_dir, str(n_subName) + '_acc.txt'), 'a') as f:
+            f.write('best epoach: ' + str(best_epoch) + '\n' + 'best acc: ' + str(test_acc)
+                    + '\n' + 'matrix_acc: ' + str(matrix) + '\n')
 
+        hist['best_epoch'] = best_epoch
+        histories[n_subName] = hist
+        total_pred += te_pred
+        total_gt += te_gt
+        UF1, UAR = recognition_evaluation(total_gt, total_pred)
+        print('Subject %s done: n=%d best_epoch=%d | pooled UF1=%s UAR=%s'
+              % (n_subName, len(te_gt), best_epoch, str(UF1), str(UAR)))
 
-            temp_best_each_subject_pred = []
-            if best_accuracy_for_each_subject < val_acc:
-                best_accuracy_for_each_subject = val_acc
-                temp_best_each_subject_pred.extend(torch.max(yhat, 1)[1].tolist())
-                best_each_subject_pred = temp_best_each_subject_pred
-                best_matrix=matrix
-                best_epoch=epoch
-                # Save Weights
-                # if (config.train):
-                #     torch.save(model.state_dict(), weight_path)
-            if val_acc>=1:
-                with open(os.path.join(results_dir, str(n_subName) + '_acc.txt'), 'a') as f:
-                    f.write('best epoach: ' + str(best_epoch) + '\n' + 'best acc: ' + str(
-                        best_accuracy_for_each_subject) + '\n' + 'matrix_acc: ' + str(best_matrix) + '\n')
+    with open(os.path.join(results_dir, 'history.json'), 'w') as f:
+        json.dump(histories, f)
 
-                break
-            if epoch == epochs:
-
-                with open(os.path.join(results_dir, str(n_subName) + '_acc.txt'), 'a') as f:
-                    f.write('best epoach: ' + str(best_epoch) + '\n' + 'best acc: ' + str(
-                        best_accuracy_for_each_subject) + '\n' + 'matrix_acc: ' + str(best_matrix) + '\n')
-
-
-
-        print('Best Predicted    :', best_each_subject_pred)
-        accuracydict = {}
-        accuracydict['pred'] = best_each_subject_pred
-        accuracydict['truth'] = y.tolist()
-        all_accuracy_dict[n_subName] = accuracydict
-
-        print('Ground Truth :', y.tolist())
-        print('Evaluation until this subject: ')
-        total_pred.extend(torch.max(yhat, 1)[1].tolist())
-        total_gt.extend(y.tolist())
-        best_total_pred.extend(best_each_subject_pred)
-        UF1, UAR = recognition_evaluation(total_gt, total_pred, show=True)
-        best_UF1, best_UAR = recognition_evaluation(total_gt, best_total_pred, show=True)
-        print('best UF1:', round(best_UF1, 4), '| best UAR:', round(best_UAR, 4))
-
-    print('Final Evaluation: ')
+    print('Final Evaluation:')
     UF1, UAR = recognition_evaluation(total_gt, total_pred)
-    print(np.shape(total_gt))
+    print('pooled UF1=%s UAR=%s over n=%d' % (str(UF1), str(UAR), len(total_gt)))
     print('Total Time Taken:', time.time() - t)
-    print(all_accuracy_dict)
 
 
 if __name__ == '__main__':
@@ -406,9 +311,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--train', type=strtobool, default=True)
     parser.add_argument('--attn_mode', type=str, default='shared',
-                        choices=['shared', 'disentangled', 'shared_wide'],
-                        help="Phase attention: shared (CausalNet baseline), disentangled "
-                             "(per-phase params, the contribution), or shared_wide (capacity control).")
+                        choices=['shared', 'dual', 'shared_matched'],
+                        help="Phase attention: shared (CausalNet baseline), dual "
+                             "(per-phase params, the contribution), or shared_matched (capacity control).")
     parser.add_argument('--seed', type=int, default=2025)
     parser.add_argument('--run_name', type=str, default='',
                         help="Results subfolder name. Defaults to '<attn_mode>_seed<seed>'.")

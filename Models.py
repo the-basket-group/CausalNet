@@ -240,12 +240,12 @@ class SpatialTemporalCausalAttention(nn.Module):
     # mode selects how the per-phase spatial (self-)attention is parameterised (RQ1):
     #   'shared'       - one spatial-attention parameter set (theta) processes both the
     #                    contraction and relaxation phases. This is CausalNet's default.
-    #   'disentangled' - each phase gets its own spatial-attention set (theta_c, theta_r);
-    #                    this is the proposed phase-disentangled attention (the contribution).
-    #   'shared_wide'  - phases still share weights, but a second set is applied as an extra
-    #                    shared layer so the parameter budget matches 'disentangled'. This is
+    #   'dual' - each phase gets its own spatial-attention set (theta_c, theta_r);
+    #                    this is the proposed phase-dual attention (the contribution).
+    #   'shared_matched'  - phases still share weights, but a second set is applied as an extra
+    #                    shared layer so the parameter budget matches 'dual'. This is
     #                    the capacity control (proposal Sec 4.5): it isolates whether any gain
-    #                    is from disentangling the phases or merely from the added parameters.
+    #                    is from separating the phases or merely from the added parameters.
     # The temporal/causal cross-attention (the phase interaction) is left shared in every mode.
     def __init__(self, dim, heads=8, dropout=0., gamma=0.4, mode='shared'):
         super().__init__()
@@ -293,9 +293,9 @@ class SpatialTemporalCausalAttention(nn.Module):
 
         # Second spatial-attention set, created only for the non-shared modes so that
         # 'shared' stays bit-for-bit identical to the original CausalNet (same modules,
-        # same weight-init RNG order). In 'disentangled' it is the relaxation-phase set;
-        # in 'shared_wide' it is the extra shared layer.
-        if mode in ('disentangled', 'shared_wide'):
+        # same weight-init RNG order). In 'dual' it is the relaxation-phase set;
+        # in 'shared_matched' it is the extra shared layer.
+        if mode in ('dual', 'shared_matched'):
             self.to_q2 = nn.Linear(dim, dim)
             self.to_kv2 = nn.Linear(dim, dim * 2)
             self.to_out2 = nn.Sequential(
@@ -373,12 +373,12 @@ class SpatialTemporalCausalAttention(nn.Module):
 
     def forward(self, x1, x2):
 
-        if self.mode == 'disentangled':
+        if self.mode == 'dual':
             # Each phase processed by its own spatial-attention parameters (theta_c, theta_r).
             x1 = self._spatial(x1, self.to_q, self.to_kv, self.to_out) + x1
             x2 = self._spatial(x2, self.to_q2, self.to_kv2, self.to_out2) + x2
-        elif self.mode == 'shared_wide':
-            # Shared across phases, but two stacked sets -> same param budget as disentangled.
+        elif self.mode == 'shared_matched':
+            # Shared across phases, but two stacked sets -> same param budget as dual.
             x1 = self._spatial(x1, self.to_q, self.to_kv, self.to_out) + x1
             x1 = self._spatial(x1, self.to_q2, self.to_kv2, self.to_out2) + x1
             x2 = self._spatial(x2, self.to_q, self.to_kv, self.to_out) + x2
