@@ -186,11 +186,12 @@ def main(config):
 
     learning_rate = 0.00005
     batch_size = 256 * 4
-    epochs = 200
+    epochs = config.epochs
     n_val = 4  # subjects held out of each fold's training pool for validation
+    patience, min_delta = config.patience, 1e-4  # early stop on validation-UF1 plateau
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     loss_fn = nn.CrossEntropyLoss()
-    print('lr=%f, epochs=%d, n_val=%d, device=%s\n' % (learning_rate, epochs, n_val, device))
+    print('lr=%f, epochs=%d, patience=%d, n_val=%d, device=%s\n' % (learning_rate, epochs, patience, n_val, device))
 
     main_path = './datasets/three_norm_u_v_os'
     subName = os.listdir(main_path)
@@ -231,7 +232,7 @@ def main(config):
         ).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-        best_val_uf1, best_state, best_epoch = -1.0, None, 0
+        best_val_uf1, best_state, best_epoch, wait = -1.0, None, 0, 0
         hist = {'train_loss': [], 'val_loss': [], 'val_uf1': []}
 
         for epoch in range(1, epochs + 1):
@@ -264,11 +265,16 @@ def main(config):
             hist['train_loss'].append(tr_loss)
             hist['val_loss'].append(v_loss)
             hist['val_uf1'].append(v_uf1)
-            if v_uf1 > best_val_uf1:
-                best_val_uf1, best_epoch = v_uf1, epoch
+            if v_uf1 > best_val_uf1 + min_delta:
+                best_val_uf1, best_epoch, wait = v_uf1, epoch, 0
                 best_state = deepcopy(model.state_dict())
-            print('[Epoch %d] train_loss=%.4f val_loss=%.4f val_uf1=%.4f (best_epoch=%d)'
-                  % (epoch, tr_loss, v_loss, v_uf1, best_epoch))
+            else:
+                wait += 1
+            print('[Epoch %d] train_loss=%.4f val_loss=%.4f val_uf1=%.4f (best_epoch=%d wait=%d)'
+                  % (epoch, tr_loss, v_loss, v_uf1, best_epoch, wait))
+            if wait >= patience:
+                print('  early stop at epoch %d: no val-UF1 improvement for %d epochs' % (epoch, patience))
+                break
 
         # Test once, with the best-validation checkpoint.
         model.load_state_dict(best_state)
@@ -315,6 +321,9 @@ if __name__ == '__main__':
                         help="Phase attention: shared (CausalNet baseline), dual "
                              "(per-phase params, the contribution), or shared_matched (capacity control).")
     parser.add_argument('--seed', type=int, default=2025)
+    parser.add_argument('--epochs', type=int, default=200, help="Max epochs per fold.")
+    parser.add_argument('--patience', type=int, default=40,
+                        help="Early stop after this many epochs without val-UF1 improvement.")
     parser.add_argument('--run_name', type=str, default='',
                         help="Results subfolder name. Defaults to '<attn_mode>_seed<seed>'.")
     config = parser.parse_args()
