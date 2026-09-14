@@ -133,6 +133,11 @@ def crop_optical_flow_block():
     return four_parts_optical_flow_imgs
 
 
+def fmt4(v):
+    # 4 decimals for real numbers; leave '' / nan as-is (nan != nan).
+    return '%.4f' % v if isinstance(v, float) and v == v else str(v)
+
+
 def subject_of(name):
     # Subject id is the first underscore-token: '006_006_1_2'->'006', 'sub09_..'->'sub09', 's04_..'->'s04'.
     return name.split('_')[0]
@@ -300,14 +305,14 @@ def main(config):
         total_gt += te_gt
         UF1, UAR = recognition_evaluation(total_gt, total_pred)
         print('Subject %s done: n=%d best_epoch=%d | pooled UF1=%s UAR=%s'
-              % (n_subName, len(te_gt), best_epoch, str(UF1), str(UAR)))
+              % (n_subName, len(te_gt), best_epoch, fmt4(UF1), fmt4(UAR)))
 
     with open(os.path.join(results_dir, 'history.json'), 'w') as f:
         json.dump(histories, f)
 
     print('Final Evaluation:')
     UF1, UAR = recognition_evaluation(total_gt, total_pred)
-    print('pooled UF1=%s UAR=%s over n=%d' % (str(UF1), str(UAR), len(total_gt)))
+    print('pooled UF1=%s UAR=%s over n=%d' % (fmt4(UF1), fmt4(UAR), len(total_gt)))
     print('Total Time Taken:', time.time() - t)
 
 
